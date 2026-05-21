@@ -24,6 +24,8 @@ type RpcReceipt = {
 type State = {
   lastScannedBlock: number;
   alertedTxs: string[];
+  bankrLaunches: Record<string, BankrLaunch>;
+  lastBankrLaunchRefreshAt: number;
 };
 
 type TokenInfo = {
@@ -68,6 +70,28 @@ type ClaimSummary = {
   releases: Release[];
   releasedTransfers: Transfer[];
   collectedTransfers: Transfer[];
+  bankrLaunch?: BankrLaunch;
+};
+
+type BankrLaunch = {
+  tokenAddress: Address;
+  tokenName: string;
+  tokenSymbol: string;
+  chain: string;
+  launchType?: string;
+  poolId?: Hex;
+  txHash?: Hex;
+  timestamp?: number;
+  deployer?: {
+    walletAddress?: Address;
+    xUsername?: string;
+  };
+  feeRecipient?: {
+    walletAddress?: Address;
+    xUsername?: string;
+  };
+  tweetUrl?: string;
+  websiteUrl?: string;
 };
 
 const TRANSFER_TOPIC =
@@ -87,6 +111,9 @@ const config = {
   feeDistributorAddresses: addressListEnv("FEE_DISTRIBUTOR_ADDRESSES"),
   minRawClaimAmount: BigInt(env("MIN_RAW_CLAIM_AMOUNT", "0")),
   minEthClaimWei: parseUnits(env("MIN_ETH_CLAIM_AMOUNT", "0.1"), 18),
+  requireBankrLaunch: boolEnv("REQUIRE_BANKR_LAUNCH", true),
+  bankrLaunchesUrl: env("BANKR_LAUNCHES_URL", "https://api.bankr.bot/token-launches"),
+  bankrLaunchRefreshMs: numberEnv("BANKR_LAUNCH_REFRESH_MS", 60000),
   enableDexScreener: boolEnv("ENABLE_DEXSCREENER", true),
   telegramBotToken: env("TELEGRAM_BOT_TOKEN", ""),
   telegramChatId: env("TELEGRAM_CHAT_ID", ""),
@@ -116,6 +143,7 @@ await main();
 
 async function main(): Promise<void> {
   let state = readState();
+  state = await refreshBankrLaunchesIfNeeded(state, true);
 
   if (config.scanOnceFromBlock && config.scanOnceToBlock) {
     await scanRange(state, config.scanOnceFromBlock, config.scanOnceToBlock);
@@ -144,6 +172,8 @@ async function main(): Promise<void> {
 }
 
 async function scanRange(state: State, fromBlock: number, toBlock: number): Promise<State> {
+  state = await refreshBankrLaunchesIfNeeded(state);
+
   for (let start = fromBlock; start <= toBlock; start += config.blockChunkSize) {
     const end = Math.min(start + config.blockChunkSize - 1, toBlock);
     const releaseLogs = await getReleaseLogs(start, end);
@@ -156,7 +186,7 @@ async function scanRange(state: State, fromBlock: number, toBlock: number): Prom
       const releases = logs.map(parseReleaseLog).filter((release) => release !== null);
       const claim = await buildClaim(receipt, releases);
 
-      if (claim.releases.length > 0 && claimMeetsMinimums(claim)) {
+      if (claim.releases.length > 0 && claimMeetsMinimums(claim) && claimPassesBankrFilter(claim, state)) {
         await sendClaimAlert(txHash as Hex, claim);
         state.alertedTxs.push(txHash);
         state.alertedTxs = state.alertedTxs.slice(-1000);
@@ -294,7 +324,7 @@ async function ethCall(to: Address, data: Hex): Promise<Hex> {
 }
 
 async function sendClaimAlert(txHash: Hex, claim: ClaimSummary): Promise<void> {
-  const { releases, releasedTransfers, collectedTransfers } = claim;
+  const { releases, releasedTransfers, collectedTransfers, bankrLaunch } = claim;
   const beneficiaries = unique(releases.map((release) => release.beneficiary));
   const beneficiary = beneficiaries[0] ?? ("0x0000000000000000000000000000000000000000" as Address);
   const releasedEth = findEthTransfer(releasedTransfers);
@@ -311,8 +341,8 @@ async function sendClaimAlert(txHash: Hex, claim: ClaimSummary): Promise<void> {
     "🎉 NEW BANKR FEE CLAIMED!",
     "",
     "Token Information:",
-    `• Name: ${market?.name ?? "Unknown"}`,
-    `• Symbol: ${market?.symbol ?? releasedToken?.token.symbol ?? "Unknown"}`,
+    `• Name: ${bankrLaunch?.tokenName ?? market?.name ?? "Unknown"}`,
+    `• Symbol: ${bankrLaunch?.tokenSymbol ?? market?.symbol ?? releasedToken?.token.symbol ?? "Unknown"}`,
     `• Contract: ${releasedToken?.token.address ?? "Unknown"}`,
     `• Market Cap: ${formatUsdCompact(market?.marketCapUsd ?? null)}`,
     `• Liquidity: ${formatUsdCompact(market?.liquidityUsd ?? null)}`,
@@ -341,6 +371,94 @@ async function sendClaimAlert(txHash: Hex, claim: ClaimSummary): Promise<void> {
 function claimMeetsMinimums(claim: ClaimSummary): boolean {
   const releasedEth = findEthTransfer(claim.releasedTransfers);
   return releasedEth !== undefined && releasedEth.rawAmount >= config.minEthClaimWei;
+}
+
+function claimPassesBankrFilter(claim: ClaimSummary, state: State): boolean {
+  if (!config.requireBankrLaunch) return true;
+
+  const releasedToken = findProjectTokenTransfer(claim.releasedTransfers);
+  if (!releasedToken) return false;
+
+  const bankrLaunch = state.bankrLaunches[releasedToken.token.address];
+  if (!bankrLaunch) return false;
+
+  claim.bankrLaunch = bankrLaunch;
+  return true;
+}
+
+async function refreshBankrLaunchesIfNeeded(state: State, force = false): Promise<State> {
+  if (!config.requireBankrLaunch) return state;
+
+  const now = Date.now();
+  if (!force && now - state.lastBankrLaunchRefreshAt < config.bankrLaunchRefreshMs) {
+    return state;
+  }
+
+  try {
+    const launches = await fetchBankrLaunches();
+    for (const launch of launches) {
+      if (launch.chain.toLowerCase() !== "base") continue;
+      state.bankrLaunches[launch.tokenAddress] = launch;
+    }
+    state.lastBankrLaunchRefreshAt = now;
+    writeState(state);
+    console.log(`Refreshed Bankr launch cache: ${launches.length} recent launch(es), ${Object.keys(state.bankrLaunches).length} cached token(s).`);
+  } catch (error) {
+    console.error("Bankr launch refresh error:", getErrorMessage(error));
+  }
+
+  return state;
+}
+
+async function fetchBankrLaunches(): Promise<BankrLaunch[]> {
+  const response = await fetch(config.bankrLaunchesUrl);
+  if (!response.ok) {
+    throw new Error(`Bankr launches failed: ${response.status} ${await response.text()}`);
+  }
+
+  const body = (await response.json()) as {
+    launches?: Array<{
+      tokenAddress?: string;
+      tokenName?: string;
+      tokenSymbol?: string;
+      chain?: string;
+      launchType?: string;
+      poolId?: string;
+      txHash?: string;
+      timestamp?: number;
+      deployer?: { walletAddress?: string; xUsername?: string };
+      feeRecipient?: { walletAddress?: string; xUsername?: string };
+      tweetUrl?: string;
+      websiteUrl?: string;
+    }>;
+  };
+
+  return (body.launches ?? [])
+    .filter((launch) => launch.tokenAddress && launch.tokenName && launch.tokenSymbol && launch.chain)
+    .map((launch) => ({
+      tokenAddress: normalizeAddress(launch.tokenAddress ?? ""),
+      tokenName: launch.tokenName ?? "",
+      tokenSymbol: launch.tokenSymbol ?? "",
+      chain: launch.chain ?? "",
+      launchType: launch.launchType,
+      poolId: launch.poolId as Hex | undefined,
+      txHash: launch.txHash as Hex | undefined,
+      timestamp: launch.timestamp,
+      deployer: launch.deployer
+        ? {
+            walletAddress: launch.deployer.walletAddress ? normalizeAddress(launch.deployer.walletAddress) : undefined,
+            xUsername: launch.deployer.xUsername
+          }
+        : undefined,
+      feeRecipient: launch.feeRecipient
+        ? {
+            walletAddress: launch.feeRecipient.walletAddress ? normalizeAddress(launch.feeRecipient.walletAddress) : undefined,
+            xUsername: launch.feeRecipient.xUsername
+          }
+        : undefined,
+      tweetUrl: launch.tweetUrl,
+      websiteUrl: launch.websiteUrl
+    }));
 }
 
 function findEthTransfer(transfers: Transfer[]): Transfer | undefined {
@@ -475,10 +593,16 @@ async function rpc<T>(method: string, params: unknown[]): Promise<T> {
 function readState(): State {
   const statePath = path.resolve(config.stateFile);
   if (!fs.existsSync(statePath)) {
-    return { lastScannedBlock: 0, alertedTxs: [] };
+    return { lastScannedBlock: 0, alertedTxs: [], bankrLaunches: {}, lastBankrLaunchRefreshAt: 0 };
   }
 
-  return JSON.parse(fs.readFileSync(statePath, "utf8")) as State;
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as Partial<State>;
+  return {
+    lastScannedBlock: state.lastScannedBlock ?? 0,
+    alertedTxs: state.alertedTxs ?? [],
+    bankrLaunches: state.bankrLaunches ?? {},
+    lastBankrLaunchRefreshAt: state.lastBankrLaunchRefreshAt ?? 0
+  };
 }
 
 function writeState(state: State): void {

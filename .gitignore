@@ -3,6 +3,7 @@ node_modules/
 .bot-state.json
 .test-state.json
 .real-example-state.json
+.bankr-filter-test-state.json
 dist/
 npm-debug.log*
 *.log

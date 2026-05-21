@@ -90,8 +90,19 @@ https://basescan.org/tx/0x...
 - Public RPC is okay for testing. For always-on monitoring, use an Alchemy, QuickNode, Ankr, or other private Base RPC URL.
 - The bot stores the last scanned block in `.bot-state.json`.
 - `MIN_ETH_CLAIM_AMOUNT=0.1` means alerts are only sent when released ETH/WETH is at least `0.1 ETH`.
+- `REQUIRE_BANKR_LAUNCH=true` means alerts are only sent for tokens verified from Bankr's official launch API.
 - Leave `FEE_DISTRIBUTOR_ADDRESSES` empty to watch the release event from all contracts.
 - Add one or more comma-separated distributor contracts if you want fewer false positives.
+
+## Bankr Launch Filter
+
+Bankr's official docs list `GET https://api.bankr.bot/token-launches` as the unauthenticated feed behind `bankr.bot/launches`. It returns the 50 most recent tokens deployed via Bankr/Doppler on Base.
+
+The bot refreshes that feed every minute and stores discovered token addresses in `.bot-state.json`. This means:
+
+- Future Bankr launches will be learned automatically while the bot is running.
+- Claims for tokens not found in the Bankr launch cache are skipped.
+- Very old Bankr tokens may be skipped until their address has previously been seen by this bot or `REQUIRE_BANKR_LAUNCH=false` is used for historical testing.
 
 ## Historical Test
 
