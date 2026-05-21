@@ -1,0 +1,7 @@
+node_modules/
+.env
+.bot-state.json
+.test-state.json
+dist/
+npm-debug.log*
+*.log

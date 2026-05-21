@@ -1,0 +1,14 @@
+{
+  "name": "base-fee-claim-alert-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-strip-types src/index.ts",
+    "telegram:test": "node --experimental-strip-types src/telegram-test.ts",
+    "check": "node --experimental-strip-types --check src/index.ts && node --experimental-strip-types --check src/telegram-test.ts"
+  },
+  "engines": {
+    "node": ">=23"
+  }
+}
