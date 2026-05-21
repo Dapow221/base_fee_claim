@@ -86,6 +86,7 @@ const config = {
   rpcUrl: env("BASE_RPC_URL", "https://mainnet.base.org"),
   feeDistributorAddresses: addressListEnv("FEE_DISTRIBUTOR_ADDRESSES"),
   minRawClaimAmount: BigInt(env("MIN_RAW_CLAIM_AMOUNT", "0")),
+  minEthClaimWei: parseUnits(env("MIN_ETH_CLAIM_AMOUNT", "0.1"), 18),
   enableDexScreener: boolEnv("ENABLE_DEXSCREENER", true),
   telegramBotToken: env("TELEGRAM_BOT_TOKEN", ""),
   telegramChatId: env("TELEGRAM_CHAT_ID", ""),
@@ -155,7 +156,7 @@ async function scanRange(state: State, fromBlock: number, toBlock: number): Prom
       const releases = logs.map(parseReleaseLog).filter((release) => release !== null);
       const claim = await buildClaim(receipt, releases);
 
-      if (claim.releases.length > 0) {
+      if (claim.releases.length > 0 && claimMeetsMinimums(claim)) {
         await sendClaimAlert(txHash as Hex, claim);
         state.alertedTxs.push(txHash);
         state.alertedTxs = state.alertedTxs.slice(-1000);
@@ -335,6 +336,11 @@ async function sendClaimAlert(txHash: Hex, claim: ClaimSummary): Promise<void> {
     config.telegramBotToken && config.telegramChatId ? sendTelegram(message) : Promise.resolve(),
     config.discordWebhookUrl ? sendDiscord(message) : Promise.resolve()
   ]);
+}
+
+function claimMeetsMinimums(claim: ClaimSummary): boolean {
+  const releasedEth = findEthTransfer(claim.releasedTransfers);
+  return releasedEth !== undefined && releasedEth.rawAmount >= config.minEthClaimWei;
 }
 
 function findEthTransfer(transfers: Transfer[]): Transfer | undefined {
@@ -568,6 +574,13 @@ function formatUnits(value: bigint, decimals: number): string {
   const fraction = value % base;
   const fractionText = fraction.toString().padStart(decimals, "0").replace(/0+$/, "");
   return fractionText ? `${whole}.${fractionText.slice(0, 6)}` : whole.toString();
+}
+
+function parseUnits(value: string, decimals: number): bigint {
+  const [wholePart, fractionPart = ""] = value.trim().split(".");
+  const whole = BigInt(wholePart || "0") * 10n ** BigInt(decimals);
+  const fraction = BigInt(fractionPart.padEnd(decimals, "0").slice(0, decimals) || "0");
+  return whole + fraction;
 }
 
 function groupBy<T>(items: T[], getKey: (item: T) => string): Map<string, T[]> {

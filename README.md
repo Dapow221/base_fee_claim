@@ -89,6 +89,7 @@ https://basescan.org/tx/0x...
 
 - Public RPC is okay for testing. For always-on monitoring, use an Alchemy, QuickNode, Ankr, or other private Base RPC URL.
 - The bot stores the last scanned block in `.bot-state.json`.
+- `MIN_ETH_CLAIM_AMOUNT=0.1` means alerts are only sent when released ETH/WETH is at least `0.1 ETH`.
 - Leave `FEE_DISTRIBUTOR_ADDRESSES` empty to watch the release event from all contracts.
 - Add one or more comma-separated distributor contracts if you want fewer false positives.
 
