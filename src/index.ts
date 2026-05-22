@@ -25,6 +25,7 @@ type State = {
   lastScannedBlock: number;
   alertedTxs: string[];
   bankrLaunches: Record<string, BankrLaunch>;
+  bankrTokenFees: Record<string, BankrTokenFees>;
   lastBankrLaunchRefreshAt: number;
 };
 
@@ -94,6 +95,24 @@ type BankrLaunch = {
   websiteUrl?: string;
 };
 
+type BankrTokenFees = {
+  address: Address;
+  chain: string;
+  xUsername?: string;
+  tokens: Array<{
+    tokenAddress: Address;
+    name: string;
+    symbol: string;
+    poolId: Hex;
+    share?: string;
+  }>;
+  totals?: {
+    claimableWeth?: string;
+    claimedWeth?: string;
+    claimCount?: number;
+  };
+};
+
 const TRANSFER_TOPIC =
   "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" as Hex;
 const RELEASE_TOPIC =
@@ -113,6 +132,7 @@ const config = {
   minEthClaimWei: parseUnits(env("MIN_ETH_CLAIM_AMOUNT", "0.1"), 18),
   requireBankrLaunch: boolEnv("REQUIRE_BANKR_LAUNCH", true),
   bankrLaunchesUrl: env("BANKR_LAUNCHES_URL", "https://api.bankr.bot/token-launches"),
+  bankrApiBaseUrl: env("BANKR_API_BASE_URL", "https://api.bankr.bot"),
   bankrLaunchRefreshMs: numberEnv("BANKR_LAUNCH_REFRESH_MS", 60000),
   enableDexScreener: boolEnv("ENABLE_DEXSCREENER", true),
   telegramBotToken: env("TELEGRAM_BOT_TOKEN", ""),
@@ -186,7 +206,7 @@ async function scanRange(state: State, fromBlock: number, toBlock: number): Prom
       const releases = logs.map(parseReleaseLog).filter((release) => release !== null);
       const claim = await buildClaim(receipt, releases);
 
-      if (claim.releases.length > 0 && claimMeetsMinimums(claim) && claimPassesBankrFilter(claim, state)) {
+      if (claim.releases.length > 0 && claimMeetsMinimums(claim) && (await claimPassesBankrFilter(claim, state))) {
         await sendClaimAlert(txHash as Hex, claim);
         state.alertedTxs.push(txHash);
         state.alertedTxs = state.alertedTxs.slice(-1000);
@@ -350,6 +370,7 @@ async function sendClaimAlert(txHash: Hex, claim: ClaimSummary): Promise<void> {
     "Released to Beneficiary:",
     `• Token Amount: ${formatTokenLine(releasedToken)}`,
     `• ETH Amount: ${formatEthLine(releasedEth)}`,
+    `• X Handle: ${formatXHandle(bankrLaunch?.feeRecipient?.xUsername ?? bankrLaunch?.deployer?.xUsername)}`,
     `• Beneficiary: ${shortAddress(beneficiary)}`,
     `• Full Address: ${beneficiary}`,
     "",
@@ -373,17 +394,89 @@ function claimMeetsMinimums(claim: ClaimSummary): boolean {
   return releasedEth !== undefined && releasedEth.rawAmount >= config.minEthClaimWei;
 }
 
-function claimPassesBankrFilter(claim: ClaimSummary, state: State): boolean {
+async function claimPassesBankrFilter(claim: ClaimSummary, state: State): Promise<boolean> {
   if (!config.requireBankrLaunch) return true;
 
   const releasedToken = findProjectTokenTransfer(claim.releasedTransfers);
   if (!releasedToken) return false;
 
-  const bankrLaunch = state.bankrLaunches[releasedToken.token.address];
-  if (!bankrLaunch) return false;
+  const fees = await getBankrTokenFees(releasedToken.token.address, state);
+  if (!fees || fees.address !== releasedToken.to) return false;
 
-  claim.bankrLaunch = bankrLaunch;
+  claim.releases = claim.releases.filter((release) => release.beneficiary === fees.address);
+  claim.releasedTransfers = claim.releasedTransfers.filter((transfer) => transfer.to === fees.address);
+  if (!claim.releases.length || !findEthTransfer(claim.releasedTransfers) || !findProjectTokenTransfer(claim.releasedTransfers)) {
+    return false;
+  }
+
+  const tokenFees = fees.tokens.find((token) => token.tokenAddress === releasedToken.token.address);
+  claim.bankrLaunch = state.bankrLaunches[releasedToken.token.address] ?? {
+    tokenAddress: releasedToken.token.address,
+    tokenName: tokenFees?.name ?? releasedToken.token.symbol,
+    tokenSymbol: tokenFees?.symbol ?? releasedToken.token.symbol,
+    chain: fees.chain,
+    poolId: tokenFees?.poolId,
+    feeRecipient: { walletAddress: fees.address, xUsername: fees.xUsername }
+  };
   return true;
+}
+
+async function getBankrTokenFees(tokenAddress: Address, state: State): Promise<BankrTokenFees | null> {
+  const cached = state.bankrTokenFees[tokenAddress];
+  if (cached) return cached;
+
+  try {
+    const fees = await fetchBankrTokenFees(tokenAddress);
+    state.bankrTokenFees[tokenAddress] = fees;
+    writeState(state);
+    return fees;
+  } catch (error) {
+    console.error(`Bankr token-fees lookup failed for ${tokenAddress}:`, getErrorMessage(error));
+    return null;
+  }
+}
+
+async function fetchBankrTokenFees(tokenAddress: Address): Promise<BankrTokenFees> {
+  const response = await fetch(`${config.bankrApiBaseUrl}/token-launches/${tokenAddress}/fees`);
+  if (!response.ok) {
+    throw new Error(`Bankr token fees failed: ${response.status} ${await response.text()}`);
+  }
+
+  const body = (await response.json()) as {
+    address?: string;
+    xUsername?: string;
+    chain?: string;
+    tokens?: Array<{
+      tokenAddress?: string;
+      name?: string;
+      symbol?: string;
+      poolId?: string;
+      share?: string;
+    }>;
+    totals?: {
+      claimableWeth?: string;
+      claimedWeth?: string;
+      claimCount?: number;
+    };
+  };
+
+  if (!body.address || !body.chain || !body.tokens?.length) {
+    throw new Error("Bankr token fees response did not include a recipient and token metadata");
+  }
+
+  return {
+    address: normalizeAddress(body.address),
+    chain: body.chain,
+    xUsername: body.xUsername,
+    tokens: body.tokens.map((token) => ({
+      tokenAddress: normalizeAddress(token.tokenAddress ?? ""),
+      name: token.name ?? "",
+      symbol: token.symbol ?? "",
+      poolId: token.poolId as Hex,
+      share: token.share
+    })),
+    totals: body.totals
+  };
 }
 
 async function refreshBankrLaunchesIfNeeded(state: State, force = false): Promise<State> {
@@ -526,6 +619,10 @@ function formatEthLine(transfer: Transfer | undefined): string {
   return `${formatNumberString(transfer.amount)} ETH`;
 }
 
+function formatXHandle(username: string | undefined): string {
+  return username ? `@${username.replace(/^@/, "")}` : "Unknown";
+}
+
 function formatNumberString(value: string): string {
   const [whole, fraction = ""] = value.split(".");
   const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -593,7 +690,7 @@ async function rpc<T>(method: string, params: unknown[]): Promise<T> {
 function readState(): State {
   const statePath = path.resolve(config.stateFile);
   if (!fs.existsSync(statePath)) {
-    return { lastScannedBlock: 0, alertedTxs: [], bankrLaunches: {}, lastBankrLaunchRefreshAt: 0 };
+    return { lastScannedBlock: 0, alertedTxs: [], bankrLaunches: {}, bankrTokenFees: {}, lastBankrLaunchRefreshAt: 0 };
   }
 
   const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as Partial<State>;
@@ -601,6 +698,7 @@ function readState(): State {
     lastScannedBlock: state.lastScannedBlock ?? 0,
     alertedTxs: state.alertedTxs ?? [],
     bankrLaunches: state.bankrLaunches ?? {},
+    bankrTokenFees: state.bankrTokenFees ?? {},
     lastBankrLaunchRefreshAt: state.lastBankrLaunchRefreshAt ?? 0
   };
 }

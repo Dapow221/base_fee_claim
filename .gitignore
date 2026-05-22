@@ -4,6 +4,7 @@ node_modules/
 .test-state.json
 .real-example-state.json
 .bankr-filter-test-state.json
+.recipient-filter-test-state.json
 dist/
 npm-debug.log*
 *.log

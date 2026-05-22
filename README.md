@@ -53,6 +53,7 @@ Each alert includes:
 
 - Token name, symbol, contract, market cap, and liquidity
 - Released token and ETH amounts
+- Fee recipient X handle when Bankr provides one
 - Beneficiary/dev wallet
 - Total collected token and ETH amounts
 - Transaction hash
@@ -75,6 +76,7 @@ Token Information:
 Released to Beneficiary:
 • Token Amount: 8,017,743.21 TOKEN
 • ETH Amount: 0.001354 ETH
+• X Handle: @creator
 • Beneficiary: 0x91a2...d522
 • Full Address: 0x91a20622c55e55239dc62b85781e5f627821d522
 
@@ -98,11 +100,14 @@ https://basescan.org/tx/0x...
 
 Bankr's official docs list `GET https://api.bankr.bot/token-launches` as the unauthenticated feed behind `bankr.bot/launches`. It returns the 50 most recent tokens deployed via Bankr/Doppler on Base.
 
-The bot refreshes that feed every minute and stores discovered token addresses in `.bot-state.json`. This means:
+The bot also checks `GET /token-launches/:tokenAddress/fees` before alerting. That endpoint returns the official fee recipient address for the token. The alert is skipped unless the on-chain `Release` beneficiary equals that Bankr recipient.
+
+The bot refreshes the recent launch feed every minute and stores discovered token addresses in `.bot-state.json`. This means:
 
 - Future Bankr launches will be learned automatically while the bot is running.
-- Claims for tokens not found in the Bankr launch cache are skipped.
-- Very old Bankr tokens may be skipped until their address has previously been seen by this bot or `REQUIRE_BANKR_LAUNCH=false` is used for historical testing.
+- Claims for tokens that Bankr's per-token fees API does not recognize are skipped.
+- Claims triggered by another wallet are fine, but only the official recipient's release is eligible for alerts.
+- Platform/partner claim slices are skipped when they do not match the token's official Bankr fee recipient.
 
 ## Historical Test
 
